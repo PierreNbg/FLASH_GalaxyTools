@@ -1,6 +1,7 @@
 import numpy as np
 import flash_amr_tools as amr_tools
 import h5py
+from tqdm import tqdm
 
 # Reads the Fortran file and returns:
 # ndim      - Number of dimensions of dataset
@@ -324,13 +325,19 @@ def get_new_ener(ener_old, eint_old, eint_new, velx_new=None, vely_new=None):
 
 # Create a copy of the old checkpoint file and update the fields
 # pres, temp, eint and ener with new values.
-def create_new_hdf(pf, fname, pres, temp, eint, ener, velx, vely):
+def create_new_hdf(
+    pf, fname, pres, temp, eint, ener, velx, vely,
+    extFieldNames=[], extFieldData=[]
+):
     if pf.filename == fname:
         print('Old and new file have same file name.\nABORT to prevent overriding data.')
         return
     
     # Get key list of the old file
     keys_old = list(pf.keys())
+    
+    useExtFields = len(extFieldNames) > 0
+    useExtFields *= len(extFieldData) == len(extFieldNames)
     
     # Remove keys we want to update from key list
     k_pres = keys_old.pop(keys_old.index('pres'))
@@ -339,6 +346,8 @@ def create_new_hdf(pf, fname, pres, temp, eint, ener, velx, vely):
     k_ener = keys_old.pop(keys_old.index('ener'))
     k_velx = keys_old.pop(keys_old.index('velx'))
     k_vely = keys_old.pop(keys_old.index('vely'))
+    if useExtFields:
+        k_unk = keys_old.pop(keys_old.index('unknown names'))
     
     # Open new file
     pf_new = h5py.File(fname, 'w')
@@ -348,13 +357,31 @@ def create_new_hdf(pf, fname, pres, temp, eint, ener, velx, vely):
         print('Add field', k)
         pf_new.create_dataset('/' + k, data=pf[k])
     
-    pf_new.create_dataset('/pres', data=pres)
-    pf_new.create_dataset('/temp', data=temp)
-    pf_new.create_dataset('/eint', data=eint)
-    pf_new.create_dataset('/ener', data=ener)
-    pf_new.create_dataset('/velx', data=velx)
-    pf_new.create_dataset('/vely', data=vely)
+    print('Add field', 'pres')
+    pf_new.create_dataset('/' + k_pres, data=pres)
+    print('Add field', 'temp')
+    pf_new.create_dataset('/' + k_temp, data=temp)
+    print('Add field', 'eint')
+    pf_new.create_dataset('/' + k_eint, data=eint)
+    print('Add field', 'ener')
+    pf_new.create_dataset('/' + k_ener, data=ener)
+    print('Add field', 'velz')
+    pf_new.create_dataset('/' + k_velx, data=velx)
+    print('Add field', 'vely')
+    pf_new.create_dataset('/' + k_vely, data=vely)
     
+    if useExtFields:
+        unk = pf["unknown names"][()]
+        for i in range(len(extFieldNames)):
+            k = extFieldNames[i]
+            d = extFieldData[i]
+            print('Add field', k)
+            pf_new.create_dataset('/' + k, data=d)
+            unk = np.append(unk, np.asarray([k.encode("utf-8")]))
+
+        unk = unk[:, None]
+        pf_new.create_dataset('/' + k_unk, data=unk)
+        
     pf_new.close()
 
 
@@ -441,7 +468,7 @@ def update_all_parent_blocks(data, gid, sel=None):
     
     if sel is not None:
         blist = sel
-        if type(blist) is int:
+        if type(blist) is not list:
             blist = [blist]
         blist = blist[::-1]
     
@@ -492,6 +519,10 @@ def update_all_parent_blocks(data, gid, sel=None):
     return data
 
 def mirror_data(data, coord, blist, ax=2):
+    print("Mirror data from lower half [zmin, 0] to upper half [0, zmax] of domain.")
+    print("\tCurrently required due to limitation in GC filling of higher")
+    print("\trefined blocks when no neighbour at the same level exists")
+    
     # Get total number of block that exist in the domain
     nrblks = coord.shape[0]
     
@@ -508,7 +539,7 @@ def mirror_data(data, coord, blist, ax=2):
     # Create tracker of blocks that have been touched
     track_blocks = np.zeros(nrblks)
     # Loop over all blocks in blist
-    for i in blist:
+    for i in tqdm(blist):
         # If block has been updated already
         # go to next block
         if track_blocks[i]:

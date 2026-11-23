@@ -104,7 +104,7 @@ def get_rotation_acc_amr(bbox, acx, acy, acz, return_vel=False, cut_reg=None):
     # Separate components
     xx = ccoords[..., 0]
     yy = ccoords[..., 1]
-    zz = ccoords[..., 2]
+    # zz = ccoords[..., 2]
     
     # Determine cylindrical distance to center
     rr = (xx ** 2 + yy ** 2) ** 0.5
@@ -169,135 +169,78 @@ def get_rotation_acc_amr(bbox, acx, acy, acz, return_vel=False, cut_reg=None):
 # Update rotation velocity with impact from pressure curves
 # which partially stabilizes the disk in radial direction
 def update_rotation_vel_amr(pres_gc, dens, bbox, gid, acx, acy, cut_reg=None):
-    # Update pressure to be uniform in mid-plane
-    # p_cor = pres.max() - pres[:,:,pres.shape[2]//2]
-    
-    # pnew = pres + p_cor[:,:,None]
-    
+    # Get cell centers of each cell
     ccoords = get_cell_centers(bbox)
+    
+    gc_slice = [
+        slice(1, 9, None),
+        slice(1, 9, None),
+        slice(1, 9, None)
+    ]
     
     # Separate components
     xx = ccoords[..., 0]
     yy = ccoords[..., 1]
     zz = ccoords[..., 2]
     
+    #blist = np.arange(pres_gc.shape[0])
+    #blist = blist[gid[:, -1] == -1].tolist()
+    
+    xx_gc = create_ghostcells(data=xx)
+    xx_gc = fill_ghostcells(data_pad=xx_gc, gid=gid, bbox=bbox)
+    yy_gc = create_ghostcells(data=yy)
+    yy_gc = fill_ghostcells(data_pad=yy_gc, gid=gid, bbox=bbox)
+
     # Get cylindrical radius
     rr = (xx ** 2 + yy ** 2) ** 0.5
     
     # Get cell size in each block
-    dx = (bbox[:, :, 1] - bbox[:, :, 0]) / dens.shape[1:]
+    #dx = (bbox[:, :, 1] - bbox[:, :, 0]) / dens.shape[1:]
     
-    # Initialize fields to 0
-    # of grad P (Hydrostatic equilibrium)
-    pgradx = np.zeros_like(pres_gc[:, 1:9, 1:9, 1:9])
-    pgrady = np.zeros_like(pgradx)
-    
-    # Determine central difference for x and y component
-    pgradx[...] = (pres_gc[:, 1:9, 1:9, 2:] - pres_gc[:, 1:9, 1:9, :-2]) / (2 * dx[:, 0][:, None, None, None])
-    pgrady[...] = (pres_gc[:, 1:9, 2:, 1:9] - pres_gc[:, 1:9, :-2, 1:9]) / (2 * dx[:, 1][:, None, None, None])
-    
-    # Only use forward / backward difference for cells at domain boundary
-    # in x-direction
-    at_xboundary_m = gid[:, 0] == -39
-    at_xboundary_p = gid[:, 1] == -39
-    
-    pgradx[at_xboundary_m, :, :, 0] = (pres_gc[at_xboundary_m, 1:9, 1:9, 2] - pres_gc[at_xboundary_m, 1:9, 1:9, 1])
-    pgradx[at_xboundary_m, :, :, 0] /= dx[at_xboundary_m, 0][:, None, None]
-    
-    pgradx[at_xboundary_p, :, :, -1] = (pres_gc[at_xboundary_p, 1:9, 1:9, -2] - pres_gc[at_xboundary_p, 1:9, 1:9, -3])
-    pgradx[at_xboundary_p, :, :, -1] /= dx[at_xboundary_p, 0][:, None, None]
-    
-    # in y-direction
-    at_yboundary_m = gid[:, 2] == -39
-    at_yboundary_p = gid[:, 3] == -39
-    
-    pgrady[at_yboundary_m, :, 0, :] = (pres_gc[at_yboundary_m, 1:9, 2, 1:9] - pres_gc[at_yboundary_m, 1:9, 1, 1:9])
-    pgrady[at_yboundary_m, :, 0, :] /= dx[at_yboundary_m, 1][:, None, None]
-    
-    pgrady[at_yboundary_p, :, -1, :] = (pres_gc[at_yboundary_p, 1:9, -2, 1:9] - pres_gc[at_yboundary_p, 1:9, -3, 1:9])
-    pgrady[at_yboundary_p, :, -1, :] /= dx[at_yboundary_p, 1][:, None, None]
+    #sl_xx_prev = gc_slice.copy()
+    #sl_xx_next = gc_slice.copy()
+    #sl_xx_prev[2 - 0] = 0
+    #sl_xx_next[2 - 0] = 1
+    #xx_gc[:, *sl_xx_prev] = xx_gc[:, *sl_xx_next] - dx[:, 0][:, None, None]
+    #sl_xx_prev[2 - 0] = 9
+    #sl_xx_next[2 - 0] = 8
+    #xx_gc[:, *sl_xx_prev] = xx_gc[:, *sl_xx_next] + dx[:, 0][:, None, None]
 
-    # Still some weird bug at boundaries of refinement levels
-    # Recalculate at boundaries if neighbour does not exist.
-    # Weigh guard cell from parent with 0.5 as their real distance is 2 times the
-    # local cell spacing
-    at_xboundary_m = gid[:, 0] == -1
-    at_xboundary_p = gid[:, 1] == -1
-    
-    pgradx[at_xboundary_m, :, :, 0] = (pres_gc[at_xboundary_m, 1:9, 1:9, 2] - pres_gc[at_xboundary_m, 1:9, 1:9, 1]) * 1.0
-    #pgradx[at_xboundary_m, :, :, 0] += (pres_gc[at_xboundary_m, 1:9, 1:9, 1] - pres_gc[at_xboundary_m, 1:9, 1:9, 0]) / 1.5
-    #pgradx[at_xboundary_m, :, :, 0] /= 2 * dx[at_xboundary_m, 0][:, None, None]
-    pgradx[at_xboundary_m, :, :, 0] /= dx[at_xboundary_m, 0][:, None, None]
-    
-    pgradx[at_xboundary_p, :, :, -1] = (pres_gc[at_xboundary_p, 1:9, 1:9, -2] - pres_gc[at_xboundary_p, 1:9, 1:9, -3]) * 1.0
-    #pgradx[at_xboundary_p, :, :, -1] += (pres_gc[at_xboundary_p, 1:9, 1:9, -1] - pres_gc[at_xboundary_p, 1:9, 1:9, -2]) / 1.5
-    #pgradx[at_xboundary_p, :, :, -1] /= 2 * dx[at_xboundary_p, 0][:, None, None]
-    pgradx[at_xboundary_p, :, :, -1] /= dx[at_xboundary_p, 0][:, None, None]
-    
-    # in y-direction
-    at_yboundary_m = gid[:, 2] == -1
-    at_yboundary_p = gid[:, 3] == -1
-    
-    pgrady[at_yboundary_m, :, 0, :] = (pres_gc[at_yboundary_m, 1:9, 2, 1:9] - pres_gc[at_yboundary_m, 1:9, 1, 1:9]) * 1.0
-    #pgrady[at_yboundary_m, :, 0, :] += 1.0 * (pres_gc[at_yboundary_m, 1:9, 1, 1:9] - pres_gc[at_yboundary_m, 1:9, 0, 1:9])
-    #pgrady[at_yboundary_m, :, 0, :] /= 2 * dx[at_yboundary_m, 1][:, None, None] / 2
-    pgrady[at_yboundary_m, :, 0, :] /= dx[at_yboundary_m, 1][:, None, None]
-    
-    pgrady[at_yboundary_p, :, -1, :] = (pres_gc[at_yboundary_p, 1:9, -2, 1:9] - pres_gc[at_yboundary_p, 1:9, -3, 1:9]) * 1.0
-    #pgrady[at_yboundary_p, :, -1, :] += 1.0 * (pres_gc[at_yboundary_p, 1:9, -1, 1:9] - pres_gc[at_yboundary_p, 1:9, -2, 1:9])
-    #pgrady[at_yboundary_p, :, -1, :] /= 2 * dx[at_yboundary_p, 1][:, None, None] / 2
-    pgrady[at_yboundary_p, :, -1, :] /= dx[at_yboundary_p, 1][:, None, None]
-    
+    #sl_yy_prev = gc_slice.copy()
+    #sl_yy_next = gc_slice.copy()
+    #sl_yy_prev[2 - 1] = 0
+    #sl_yy_next[2 - 1] = 1
+    #yy_gc[:, *sl_yy_prev] = yy_gc[:, *sl_yy_next] - dx[:, 1][:, None, None]
+    #sl_yy_prev[2 - 1] = 9
+    #sl_yy_next[2 - 1] = 8
+    #yy_gc[:, *sl_yy_prev] = yy_gc[:, *sl_yy_next] + dx[:, 1][:, None, None]
+
+    # pgradx = determine_grad(pres_gc=pres_gc, gid=gid, dx=dx, axis=0, use_gc_for_no_neigh=True)
+    pgradx = determine_grad(pres_gc=pres_gc, gid=gid, pos=xx_gc, axis=0, use_gc_for_no_neigh=True)
+    # pgrady = determine_grad(pres_gc=pres_gc, gid=gid, dx=dx, axis=1, use_gc_for_no_neigh=True)
+    pgrady = determine_grad(pres_gc=pres_gc, gid=gid, pos=yy_gc, axis=1, use_gc_for_no_neigh=True)
     
     # Use hydrostatic equilibrium to get acceleration due to pressure profile
     acx_p = -pgradx / dens
-    acx_gc = create_ghostcells(acx_p)
-    acx_gc = fill_ghostcells(data_pad=acx_gc, gid=gid, bbox=bbox)
-
-    at_xboundary_m = gid[:, 0] == -1
-    at_xboundary_p = gid[:, 1] == -1
-
-    acx_gc[at_xboundary_m, 1:9, 1:9, 1] = 1.5 * dx[at_xboundary_m, 0][:, None, None] * acx_gc[at_xboundary_m, 1:9, 1:9, 0]
-    acx_gc[at_xboundary_m, 1:9, 1:9, 1] += dx[at_xboundary_m, 0][:, None, None] * acx_gc[at_xboundary_m, 1:9, 1:9, 2]
-    acx_gc[at_xboundary_m, 1:9, 1:9, 1] /= 2.5 * dx[at_xboundary_m, 0][:, None, None]
-    
-    acx_gc[at_xboundary_p, 1:9, 1:9, -2] = 1.5 * dx[at_xboundary_p, 0][:, None, None] * acx_gc[at_xboundary_p, 1:9, 1:9, -1]
-    acx_gc[at_xboundary_p, 1:9, 1:9, -2] += dx[at_xboundary_p, 0][:, None, None] * acx_gc[at_xboundary_p, 1:9, 1:9, -3]
-    acx_gc[at_xboundary_p, 1:9, 1:9, -2] /= 2.5 * dx[at_xboundary_p, 0][:, None, None]
-    
-    acx_p = acx_gc[:, 1:9, 1:9, 1:9]
-    del acx_gc
-
     acy_p = -pgrady / dens
-    acy_gc = create_ghostcells(acy_p)
-    acy_gc = fill_ghostcells(data_pad=acy_gc, gid=gid, bbox=bbox)
-
-    at_yboundary_m = gid[:, 2] == -1
-    at_yboundary_p = gid[:, 3] == -1
-    
-    acy_gc[at_yboundary_m, 1:9, 1, 1:9] = 1.5 * dx[at_yboundary_m, 1][:, None, None] * acy_gc[at_yboundary_m, 1:9, 0, 1:9]
-    acy_gc[at_yboundary_m, 1:9, 1, 1:9] += dx[at_yboundary_m, 1][:, None, None] * acy_gc[at_yboundary_m, 1:9, 2, 1:9]
-    acy_gc[at_yboundary_m, 1:9, 1, 1:9] /= 2.5 * dx[at_yboundary_m, 1][:, None, None]
-    
-    acy_gc[at_yboundary_p, 1:9, -2, 1:9] = 1.5 * dx[at_yboundary_p, 1][:, None, None] * acy_gc[at_yboundary_p, 1:9, -1, 1:9]
-    acy_gc[at_yboundary_p, 1:9, -2, 1:9] += dx[at_yboundary_p, 1][:, None, None] * acy_gc[at_yboundary_p, 1:9, -3, 1:9]
-    acy_gc[at_yboundary_p, 1:9, -2, 1:9] /= 2.5 * dx[at_yboundary_p, 1][:, None, None]
-
-    acy_p = acy_gc[:, 1:9, 1:9, 1:9]
-    del acy_gc
 
     # Get angle of radial vector
     phi = np.arctan2(yy, xx)
+    
+    acr_p = acx_p * np.cos(phi) + acy_p * np.sin(phi)
     
     # Get radial component of total acceleration (gas+ext+pres)
     # ac* = (gas + ext), ac*_p = (pressure)
     # acr = (acx_p + acx) * np.cos(phi) + (acy_p + acy) * np.sin(phi)
     acr = (acx + acx_p) * np.cos(phi) + (acy + acy_p) * np.sin(phi)
-    
+    # Flip sign as we want to derive the velocity necessary to counter-act
+    # the inwards acceleration
     acr = -acr
     # Get absolute rotation velocity
     # from dark matter acceleration
-    # v = (r * d/dr phi)**0.5 = (-r * acc)**0.5
+    # v = (r * d/dr phi)**0.5 = (-r * acr)**0.5
+    # Any point which is already counter-acted by pressure
+    # will be set 0.0 velocity
     v_abs = (acr * rr) ** 0.5
     v_abs = np.nan_to_num(v_abs)
     
@@ -305,6 +248,7 @@ def update_rotation_vel_amr(pres_gc, dens, bbox, gid, acx, acy, cut_reg=None):
     print('\tVelocity range (km/s) (min/max):\t', v_abs.min() / 1e5, v_abs.max() / 1e5)
     
     # Determine x and y components of rotation
+    # Counter-clockwise rotation
     vel_x = -v_abs * np.sin(phi)
     vel_y = v_abs * np.cos(phi)
     
@@ -312,22 +256,14 @@ def update_rotation_vel_amr(pres_gc, dens, bbox, gid, acx, acy, cut_reg=None):
     vel_x = np.nan_to_num(vel_x)
     vel_y = np.nan_to_num(vel_y)
     
+    # Apply a cutting region at which the values are set to 0.0
     if cut_reg is not None:
         vel_x = np.where(cut_reg, vel_x, 0)
         vel_y = np.where(cut_reg, vel_y, 0)
         acx_p = np.where(cut_reg, acx_p, 0)
         acy_p = np.where(cut_reg, acy_p, 0)
     
-    # velx_cor = vx.copy()
-    # vely_cor = vy.copy()
-    
-    # velx_cor[1:-1, 1:-1, :] += vel_x[1:-1, 1:-1, :]
-    # vely_cor[1:-1, 1:-1, :] += vel_y[1:-1, 1:-1, :]
-    
-    # velx_cor += vel_x
-    # vely_cor += vel_y
-    
-    return vel_x, vel_y, acx_p, acy_p
+    return vel_x, vel_y, acx_p, acy_p, acr_p
 
 
 # Check outlier in dataset and smooth them by taking the average of neighbours
@@ -347,3 +283,204 @@ def smooth_data(acr, gid, bbox, del_acr=0.05):
     acr_gc[:, 1:9, 1:9, 1:9][sel] = mean_acr_y[sel]
 
     return acr_gc[:, 1:9, 1:9, 1:9]
+
+
+def determine_grad(pres_gc, gid, pos, axis, use_gc_for_no_neigh=False, debug=False):
+    # Default slice for dataset with GC
+    # Selects actual data
+    sl_gc = [
+        slice(1, 9, None),
+        slice(1, 9, None),
+        slice(1, 9, None)
+    ]
+    
+    # Default slice for datasets without GC
+    sl = [
+        slice(None, None, None),
+        slice(None, None, None),
+        slice(None, None, None)
+    ]
+    
+    # Initialize field to 0
+    pgrad = np.zeros_like(pres_gc[:, *sl_gc])
+    
+    # Get gradient using central difference using cell + gc of block
+    sl_prev = sl_gc.copy()
+    sl_curr = sl_gc.copy()
+    sl_next = sl_gc.copy()
+    sl_prev[2 - axis] = slice(None, -2, None)
+    sl_curr[2 - axis] = slice(1, -1, None)
+    sl_next[2 - axis] = slice(2, None, None)
+
+    # Determine gradient for all blocks using GCs.
+    # Assume unequal spacing and thus take average between forward and backward difference.
+    # Automatically adjusts for blocks which do not have a neighbour and also reduces
+    # to default central difference on uniform spacing.
+    # pgrad = 0.5 * ((p_next - p_curr) / (x_next - x_curr) + (p_curr - p_prev) / (x_curr - x_prev))
+    #    for uniform grid x_next - x_curr = x_curr - x_prev = dx
+    # pgrad = 0.5 * (p_next - p_prev) / dx <-- typical central difference
+    pgrad[...] = (pres_gc[:, *sl_next] - pres_gc[:, *sl_curr]) / (pos[:, *sl_next] - pos[:, *sl_curr])
+    pgrad[...] += (pres_gc[:, *sl_curr] - pres_gc[:, *sl_prev]) / (pos[:, *sl_curr] - pos[:, *sl_prev])
+    pgrad[...] /= 2.
+    
+    # pgrad[...] = (pres_gc[:, *sl_next] - pres_gc[:, *sl_prev]) / (pos[:, *sl_next] - pos[:, *sl_prev])
+    # pgrad[...] = (pres_gc[:, *sl_next] - pres_gc[:, *sl_prev]) / (2 * dx[:, axis][:, None, None, None])
+    
+    # Treat special cases
+    sl_prev_gc_m = sl_gc.copy()
+    sl_next_gc_m = sl_gc.copy()
+    sl_cur_m = sl.copy()
+    # Forward difference
+    sl_prev_gc_m[2 - axis] = 1 # slice(1, 2, None)
+    sl_next_gc_m[2 - axis] = 2 # slice(2, 3, None)
+    sl_cur_m[2 - axis] = 0 #  slice(0, 1, None)
+
+    sl_prev_gc_p = sl_gc.copy()
+    sl_next_gc_p = sl_gc.copy()
+    sl_cur_p = sl.copy()
+    # Backward difference
+    sl_prev_gc_p[2 - axis] = -3 # slice(-3, -2, None)
+    sl_next_gc_p[2 - axis] = -2 # slice(-2, -1, None)
+    sl_cur_p[2 - axis] = -1 # slice(-1, None, None)
+
+    # Update faces which are at the domain boundary
+    # using forward / backward difference scheme
+    at_boundary_m = gid[:, axis * 2] == -39
+    at_boundary_p = gid[:, axis * 2 + 1] == -39
+    
+    if debug:
+        print('-39')
+        # print(pgrad[at_boundary_m].shape, pres_gc[at_boundary_m].shape, dx[at_boundary_m, axis].shape)
+        print(sl_cur_m, sl_prev_gc_m, sl_next_gc_m)
+        print()
+        # print(pgrad[at_boundary_p].shape, pres_gc[at_boundary_p].shape, dx[at_boundary_p, axis].shape)
+        print(sl_cur_p, sl_prev_gc_p, sl_next_gc_p)
+
+    pgrad[at_boundary_m, *sl_cur_m] = (pres_gc[at_boundary_m, *sl_next_gc_m] - pres_gc[at_boundary_m, *sl_prev_gc_m])
+    pgrad[at_boundary_m, *sl_cur_m] /= pos[at_boundary_m, *sl_next_gc_m] - pos[at_boundary_m, *sl_prev_gc_m]
+    # pgrad[at_boundary_m, *sl_cur_m] /= dx[at_boundary_m, axis][:, None, None]
+
+    pgrad[at_boundary_p, *sl_cur_p] = (pres_gc[at_boundary_p, *sl_next_gc_p] - pres_gc[at_boundary_p, *sl_prev_gc_p])
+    pgrad[at_boundary_p, *sl_cur_p] /= pos[at_boundary_p, *sl_next_gc_p] - pos[at_boundary_p, *sl_prev_gc_p]
+    # pgrad[at_boundary_p, *sl_cur_p] /= dx[at_boundary_p, axis][:, None, None]
+    
+    # return pgrad
+    
+    # Update faces which have no neighbour and data is from parent block.
+    # When using central difference we need to account for
+    # the extra cell spacing from the parent block of the neighbour.
+    at_boundary_m = gid[:, axis * 2] == -1
+    at_boundary_p = gid[:, axis * 2 + 1] == -1
+    
+    if use_gc_for_no_neigh:
+        # Use central difference with unequal spacing
+        sl_cur_gc_m = sl_gc.copy()
+        sl_cur_gc_m[2 - axis] = 1 # slice(1, 2, None)
+        
+        sl_next_gc_m[2 - axis] = 2 # slice(2, 3, None)
+        sl_prev_gc_m[2 - axis] = 0 # slice(0, 1, None)
+        
+        # Distance to prev is 2 times the local cell spacing
+        # dx23 = dx, dx12 = 3 * dx, a = dx12 / dx23 = 3
+        # (a * f_next + (1 - a) * f_cur - f_prev) / (2 * a * dx23)
+        # = (a * f_next + (1 - a) * f_cur - f_prev) / (2 * a * dx)
+        if debug:
+            print('-1')
+            print('Current target', sl_cur_m, '\tValue (axis)', sl_cur_m[2 - axis])
+            print('Prev val', sl_prev_gc_m, '\tValue (axis)', sl_prev_gc_m[2 - axis])
+            print('Curr val', sl_cur_gc_m, '\tValue (axis)', sl_cur_gc_m[2 - axis])
+            print('Next val', sl_next_gc_m, '\tValue (axis)', sl_next_gc_m[2 - axis])
+            print()
+        
+        a = 1.5
+        #pgrad[at_boundary_m, *sl_cur_m] = pres_gc[at_boundary_m, *sl_next_gc_m] * a
+        #pgrad[at_boundary_m, *sl_cur_m] += pres_gc[at_boundary_m, *sl_cur_gc_m] * (1 - a)
+        #pgrad[at_boundary_m, *sl_cur_m] -= pres_gc[at_boundary_m, *sl_prev_gc_m]
+        #pgrad[at_boundary_m, *sl_cur_m] /= 2 * dx[at_boundary_m, axis][:, None, None] * a
+        
+        if debug:
+            print(
+                pgrad[at_boundary_m, *sl_cur_m].shape,
+                pres_gc[at_boundary_m, *sl_next_gc_m].shape,
+                pres_gc[at_boundary_m, *sl_prev_gc_m].shape,
+                # dx[at_boundary_m, axis][:, None, None].shape
+            )
+            
+        pgrad[at_boundary_m, *sl_cur_m] = pres_gc[at_boundary_m, *sl_next_gc_m]
+        pgrad[at_boundary_m, *sl_cur_m] -= pres_gc[at_boundary_m, *sl_prev_gc_m]
+        # pgrad[at_boundary_m, *sl_cur_m] /= dx[at_boundary_m, axis][:, None, None] * (a + 1)
+        pgrad[at_boundary_m, *sl_cur_m] /= pos[at_boundary_m, *sl_next_gc_m] - pos[at_boundary_m, *sl_prev_gc_m]
+
+        sl_cur_gc_p = sl_gc.copy()
+        sl_cur_gc_p[2 - axis] = -2 # slice(-2, -1, None)
+    
+        sl_prev_gc_p[2 - axis] = -3 # slice(-3, -2, None)
+        sl_next_gc_p[2 - axis] = -1 # slice(-1, None, None)
+        
+        if debug:
+            print('Current target', sl_cur_p, '\tValue (axis)', sl_cur_p[2 - axis])
+            print('Prev val', sl_prev_gc_p, '\tValue (axis)', sl_prev_gc_p[2 - axis])
+            print('Curr val', sl_cur_gc_p, '\tValue (axis)', sl_cur_gc_p[2 - axis])
+            print('Next val', sl_next_gc_p, '\tValue (axis)', sl_next_gc_p[2 - axis])
+
+        # Distance to next is 2 times the local cell spacing
+        # dx23 = 1.5 * dx, dx12 = dx, a = dx12 / dx23 = 2. / 3. --> dx23 = 1.5 * dx = dx / a
+        # (a * f_next + (1 - a) * f_cur - f_prev) / (2 * a * dx23)
+        # = (a * f_next + (1 - a) * f_cur - f_prev) / (2 * dx)
+        #a = 1. / a
+        #pgrad[at_boundary_p, *sl_cur_p] = pres_gc[at_boundary_p, *sl_next_gc_p] * a
+        #pgrad[at_boundary_p, *sl_cur_p] += pres_gc[at_boundary_p, *sl_cur_gc_p] * (1 - a)
+        #pgrad[at_boundary_p, *sl_cur_p] -= pres_gc[at_boundary_p, *sl_prev_gc_p]
+        #pgrad[at_boundary_p, *sl_cur_p] /= 2 * dx[at_boundary_p, axis][:, None, None]
+        
+        pgrad[at_boundary_p, *sl_cur_p] = pres_gc[at_boundary_p, *sl_next_gc_p]
+        pgrad[at_boundary_p, *sl_cur_p] -= pres_gc[at_boundary_p, *sl_prev_gc_p]
+        # pgrad[at_boundary_p, *sl_cur_p] /= dx[at_boundary_p, axis][:, None, None] * (a + 1)
+        pgrad[at_boundary_p, *sl_cur_p] /= pos[at_boundary_p, *sl_next_gc_p] - pos[at_boundary_p, *sl_prev_gc_p]
+
+    else:
+        if debug:
+            print('-1')
+            print('Current target', sl_cur_m, '\tValue (axis)', sl_cur_m[2 - axis])
+            print('Prev val', sl_prev_gc_m, '\tValue (axis)', sl_prev_gc_m[2 - axis])
+            print('Next val', sl_next_gc_m, '\tValue (axis)', sl_next_gc_m[2 - axis])
+            print()
+            print('Current target', sl_cur_p, '\tValue (axis)', sl_cur_p[2 - axis])
+            print('Prev val', sl_prev_gc_p, '\tValue (axis)', sl_prev_gc_p[2 - axis])
+            print('Next val', sl_next_gc_p, '\tValue (axis)', sl_next_gc_p[2 - axis])
+            
+        # Use backward/forward difference without guard cells
+        pgrad[at_boundary_m, *sl_cur_m] = pres_gc[at_boundary_m, *sl_next_gc_m] - pres_gc[at_boundary_m, *sl_prev_gc_m]
+        # pgrad[at_boundary_m, *sl_cur_m] /= dx[at_boundary_m, axis][:, None, None]
+        pgrad[at_boundary_m, *sl_cur_m] /= pos[at_boundary_m, *sl_next_gc_m] - pos[at_boundary_m, *sl_prev_gc_m]
+        
+        pgrad[at_boundary_p, *sl_cur_p] = pres_gc[at_boundary_p, *sl_next_gc_p] - pres_gc[at_boundary_p, *sl_prev_gc_p]
+        # pgrad[at_boundary_p, *sl_cur_p] /= dx[at_boundary_p, axis][:, None, None]
+        pgrad[at_boundary_p, *sl_cur_p] /= pos[at_boundary_p, *sl_next_gc_p] - pos[at_boundary_p, *sl_prev_gc_p]
+
+    return pgrad
+
+# Determine acceleration from magnetic pressure acting on the gas
+def acc_mag_pres(pres_gc, dens, bbox, gid):
+    # Get cell size in each block
+    dx = (bbox[:, :, 1] - bbox[:, :, 0]) / dens.shape[1:]
+    
+    pgradx = determine_grad(
+        pres_gc=pres_gc, gid=gid, # dx=dx,
+        axis=0, use_gc_for_no_neigh=True
+    )
+    pgrady = determine_grad(
+        pres_gc=pres_gc, gid=gid, # dx=dx,
+        axis=1, use_gc_for_no_neigh=True
+    )
+    pgradz = determine_grad(
+        pres_gc=pres_gc, gid=gid, # dx=dx,
+        axis=2, use_gc_for_no_neigh=True
+    )
+    
+    # Determine acting acceleration from pressure gradient
+    acx_p = -pgradx / dens
+    acy_p = -pgrady / dens
+    acz_p = -pgradz / dens
+
+    return acx_p, acy_p, acz_p

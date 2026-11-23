@@ -1,47 +1,88 @@
 import numpy as np
 import h5py
 import flash_amr_tools as amr_tools
+from scipy.interpolate import RegularGridInterpolator
 
 from io_amr import update_all_parent_blocks
 
-
 def init():
-    fname = 'DwarfGal_hdf5_chk_0000'
+    import scipy.constants as const
+    
+    fname = '../../../simulation_snapshots/DwarfGal_hdf5_chk_0000'
     blist, brefs, bns = amr_tools.get_true_blocks(fname, xmin=[], xmax=[])
     pf = h5py.File(fname, 'r')
 
     bbox = pf["bounding box"][()]
     gid = pf['gid'][()]
     ref_lvl = pf['refine level'][()]
+    bs = pf['block size'][()]
+    
+    dx = bs[:, None, None, None, :] / 8 * 0.5
+    dx = np.repeat(dx, 8, axis=1)
+    dx = np.repeat(dx, 8, axis=2)
+    dx = np.repeat(dx, 8, axis=3)
     
     dens = pf["dens"][()]
     acx = pf['gacx'][()]
     acy = pf['gacy'][()]
     acz = pf['gacz'][()]
     
-    p0 = 0.0
+    p0 = 1e-18
     
-    pres = integrate_amr(dens, acc=[acx, acy, acz], bbox=bbox, gid=gid, blist=blist, p0=p0)
+    #pres, bt = integrate_amr(
+    #  dens, acc=[acx, acy, acz],
+    #  bbox=bbox, gid=gid, blist=blist, p0=p0
+    #)
+    pres, bt = integrate_amr(
+        dens=np.ones_like(dens),
+        acc=[np.zeros_like(acx), np.zeros_like(acx), np.ones_like(acx)],
+        bbox=bbox, gid=gid, blist=blist, p0=p0
+    )
+    
+    pres /= 8e3 / 2048 * const.parsec / const.centi
 
-
-def get_cell_centers(bbox):
+# Determine the cell centers of all cell within a block
+def get_cell_centers(bbox, bshape=(8, 8, 8)):
+    # Determine the number of blocks handed in
     nr_blocks = bbox.shape[0]
     
-    ccoord = np.zeros((nr_blocks, 8, 8, 8, 3))
+    # Create empty array to store the cell centers
+    arr_shape = tuple([nr_blocks] + list(bshape) + [3])
+    ccoord = np.zeros(arr_shape)
     
+    # Loop over all blocks
     for i in range(nr_blocks):
-        dx = (bbox[i, :, 1] - bbox[i, :, 0]) / (8, 8, 8)
-        x = np.linspace(bbox[i, 0, 0], bbox[i, 0, 1], 8, endpoint=False) + dx[0] / 2.
-        y = np.linspace(bbox[i, 1, 0], bbox[i, 1, 1], 8, endpoint=False) + dx[1] / 2.
-        z = np.linspace(bbox[i, 2, 0], bbox[i, 2, 1], 8, endpoint=False) + dx[2] / 2.
+        # Determine cell size
+        dx = (bbox[i, :, 1] - bbox[i, :, 0]) / bshape
+        # Determine linear spacing of cells in x-, y- and z-direction
+        # accounting for a shift of half a cell size to go to cell center from
+        # bounding box data
+        x = np.linspace(
+            bbox[i, 0, 0], bbox[i, 0, 1], bshape[0], endpoint=False
+        ) + dx[0] / 2.
+        y = np.linspace(
+            bbox[i, 1, 0], bbox[i, 1, 1], bshape[1], endpoint=False
+        ) + dx[1] / 2.
+        z = np.linspace(
+            bbox[i, 2, 0], bbox[i, 2, 1], bshape[2], endpoint=False
+        ) + dx[2] / 2.
+        # Create meshgrid to get all cell positions
         xx, yy, zz = np.meshgrid(x, y, z, indexing='ij')
+        # Store data
+        # Transpose is needed as data is stored in zyx order
         ccoord[i, ..., 0] = xx.T
         ccoord[i, ..., 1] = yy.T
         ccoord[i, ..., 2] = zz.T
 
     return ccoord
 
-def integrate_amr(dens, acc, bbox, gid, blist, p0, start_bid=None, debug=False):
+
+# Integrate an acceleration field of a density distribution
+def integrate_amr(
+    dens, acc, bbox, gid,
+    blist, p0, start_bid=None, debug=False
+):
+    # Convert block list to a list if it is an array
     if type(blist) is np.ndarray:
         blist = blist.tolist()
     
@@ -49,16 +90,34 @@ def integrate_amr(dens, acc, bbox, gid, blist, p0, start_bid=None, debug=False):
     dx = (bbox[:, :, 1] - bbox[:, :, 0]) / dens.shape[1:]
     
     # Create pressure gradient and add ghost cells for data sets
-    pgradx_gc = create_ghostcells(data=dens*acc[0]*dx[:, 0, None, None, None]*0.5)
-    pgrady_gc = create_ghostcells(data=dens*acc[1]*dx[:, 1, None, None, None]*0.5)
-    pgradz_gc = create_ghostcells(data=dens*acc[2]*dx[:, 2, None, None, None]*0.5)
+    pgradx_gc = create_ghostcells(
+        data=dens * acc[0] * dx[:, 0, None, None, None] * 0.5
+    )
+    pgrady_gc = create_ghostcells(
+        data=dens * acc[1] * dx[:, 1, None, None, None] * 0.5
+    )
+    pgradz_gc = create_ghostcells(
+        data=dens * acc[2] * dx[:, 2, None, None, None] * 0.5
+    )
     
-    pgradx_gc = fill_ghostcells(data_pad=pgradx_gc, gid=gid, bbox=bbox, debug=debug, sel=blist)
-    pgrady_gc = fill_ghostcells(data_pad=pgrady_gc, gid=gid, bbox=bbox, debug=debug, sel=blist)
-    pgradz_gc = fill_ghostcells(data_pad=pgradz_gc, gid=gid, bbox=bbox, debug=debug, sel=blist)
+    # Fill ghost cells with data of neighbouring blocks
+    # Ghost cell store value at face not cell center
+    pgradx_gc = fill_ghostcells(
+        data_pad=pgradx_gc, gid=gid, bbox=bbox,
+        debug=debug, parent_data_exist=True
+    )
+    pgrady_gc = fill_ghostcells(
+        data_pad=pgrady_gc, gid=gid, bbox=bbox,
+        debug=debug, parent_data_exist=True
+    )
+    pgradz_gc = fill_ghostcells(
+        data_pad=pgradz_gc, gid=gid, bbox=bbox,
+        debug=debug, parent_data_exist=True
+    )
     
     # Output array
     pres_gc = np.zeros_like(pgradx_gc)
+    blist = sorted(blist)
     
     print('Integrate on AMR grid')
     
@@ -106,7 +165,8 @@ def integrate_amr(dens, acc, bbox, gid, blist, p0, start_bid=None, debug=False):
             sl[2 - cax] = slice(1, 9, None)
             cax = 1
             # Don't reuse boundary value for first integration step
-            # in new direction
+            # in new direction as these have been filled in the
+            # previous iteration
             sl[2 - cax] = slice(2, 3, None)
             par_norm = 2.0
         
@@ -116,21 +176,24 @@ def integrate_amr(dens, acc, bbox, gid, blist, p0, start_bid=None, debug=False):
             sl[2 - cax] = slice(1, 9, None)
             cax = 2
             # Don't reuse boundary value for first integration step
-            # in new direction
+            # in new direction as these have been filled in the
+            # previous iteration
             sl[2 - cax] = slice(2, 3, None)
             par_norm = 4.0
             
-        # Loop as long as we don't have reached the end of the domain for all blocks
+        # Loop as long as we don't have reached the end
+        # of the domain for all blocks
         while not at_domain_edge:
             if debug:
                 print('\tBlock id', cur_bid)
                 
             # Keep blocks back whose GC are not full updated yet
-            # In case not all previous blocks have been able to update their values
-            # to current blocks
-            # Can happen for refinement level differences where it takes multiple iterations
-            # for higher refined blocks to reach the same height
-            if cax == 2:
+            # In case not all previous blocks have been able
+            # to update their values to current blocks
+            # Can happen for refinement level differences where it
+            # takes multiple iterations for higher refined blocks
+            # to reach the same height
+            if cax == 2 and False:
                 # Create a slice to select all guard cells
                 sl_loc = sl.copy()
                 sl_loc[2 - cax] = slice(
@@ -140,49 +203,73 @@ def integrate_amr(dens, acc, bbox, gid, blist, p0, start_bid=None, debug=False):
                 )
                 
                 # Check that all guard cells are filled (!= 0.0)
-                # Have to reduce array across all three dimensions as axis are kept from slicing
-                # even if they are size of 1
-                sel_blk_fullgc = np.all(pres_gc[cur_bid, *sl_loc] != 0.0, axis=(-3, -2, -1))
+                # Have to reduce array across all three dimensions
+                # as axis are kept from slicing even if they are
+                # size of 1
+                not_updated = pres_gc[cur_bid, *sl_loc] == 0.0
+                print(
+                    np.unique(
+                        np.sum(not_updated, axis=(1, 2, 3)), return_counts=True
+                    )
+                )
+                sel_blk_fullgc = np.any(not_updated, axis=(1, 2, 3))
+                sel_blk_fullgc = np.logical_not(sel_blk_fullgc)
                 # Convert current block list to array for slicing
                 cur_bid = np.asarray(cur_bid)
-                # Select blocks which have all guard cells and convert back to list
+                # Select blocks which have all guard cells and
+                # convert back to list
+                cur_bid_redo = cur_bid[np.logical_not(sel_blk_fullgc)].tolist()
                 cur_bid = cur_bid[sel_blk_fullgc].tolist()
+                if debug:
+                    #print('\tBlocks w/  full gc:', cur_bid)
+                    print('\tBlocks w/o full gc:', cur_bid_redo)
             
+            # Add all blocks to list for sanity check at the end
             blocks_time.append(cur_bid)
             blocks_touch += cur_bid
 
             # Get pressure gradients to integrate
-            pgrad_gc = [pgradx_gc[cur_bid], pgrady_gc[cur_bid], pgradz_gc[cur_bid]]
-
+            pgrad_gc = [
+                pgradx_gc[cur_bid],
+                pgrady_gc[cur_bid],
+                pgradz_gc[cur_bid]
+            ]
+            
             # Integrate data in block along given axis
             pres_gc[cur_bid] = integrate_block(
                 pres=pres_gc[cur_bid], pgrad=pgrad_gc,
                 axis=cax, sl=sl, direction=cdir,
-                debug=False
+                debug=False,
+                gc_halfstep=False
             )
             
-            if cax == 2:
-                blocks_not_updated = pres_gc[cur_bid, 1:9, 1:9, 1:9] <= 0.0
-                if debug or True:
-                    print('\tNr of cells not updated:', blocks_not_updated.sum())
-                    if blocks_not_updated.sum() > 0:
-                        print(
-                            '\tBlocks not updated correctly:',
-                            np.asarray(cur_bid)[np.any(blocks_not_updated, axis=(1, 2, 3))]
-                        )
+            # Update data of all parents of current blocks
+            #pres_gc[:, 1:9, 1:9, 1:9] = update_all_parent_blocks(
+            #    data=pres_gc[:, 1:9, 1:9, 1:9],
+            #    gid=gid,
+            #    sel=cur_bid
+            #)
             
-            # Update ghost cells of neighbours of current block
+            # Update ghost cells of neighbours of current blocks
             pres_gc = fill_ghostcells(
                 data_pad=pres_gc, gid=gid, bbox=bbox,
-                sel=cur_bid, debug=False,
-                parent_norm=par_norm
+                sel=cur_bid.copy(),
+                debug=False,
+                parent_norm=par_norm,
+                add_halfstep=[pgradx_gc, pgrady_gc, pgradz_gc]
             )
             
+            # Get new list of neighbours from current blocks
             cur_bid = get_neighbour_bid(
                 bid=cur_bid,
                 gid=gid, axis=cax, direction=cdir,
                 sl=sl
             )
+            
+            # Add blocks which did not have a full set
+            # of GC and need to be calculated
+            if cax == 2 and False:
+                cur_bid += cur_bid_redo
             
             # Reset integration to include first value
             # GC should contain correct value now
@@ -194,14 +281,17 @@ def integrate_amr(dens, acc, bbox, gid, blist, p0, start_bid=None, debug=False):
     
     print('\tBlocks touched:', np.unique(blocks_touch).size)
     
-    return pres_gc #[:, 1:9, 1:9, 1:9]
+    return pres_gc, blocks_time
 
 
 # Integrate block
 # GC value is required to exist
 # axis uses value in xyz order (x=0, y=1, z=2)
 # sl[2-axis] has to start at 1 (direction=1) or 8 (direction=-1)
-def integrate_block(pres, pgrad, axis, sl, direction=1, debug=False):
+def integrate_block(
+    pres, pgrad, axis, sl,
+    direction=1, debug=False, gc_halfstep=True
+):
     start = sl[2 - axis].start
     stop = sl[2 - axis].stop
     sl_next = sl.copy()
@@ -209,7 +299,7 @@ def integrate_block(pres, pgrad, axis, sl, direction=1, debug=False):
     sl_prev = sl.copy()
     sl_prev[2 - axis] = slice(start-direction, stop-direction, direction)
     
-    nloops = 8 - (1 - start)
+    nloops = 8 - (start - 1)
     if debug:
         print('Number of loops', nloops)
         print('Pressure shape:', pres.shape)
@@ -224,9 +314,13 @@ def integrate_block(pres, pgrad, axis, sl, direction=1, debug=False):
             print('next_step', pgrad[axis][:, *sl_next])
         
         # Take value of previous cell
+        # If GC value we are at the face and only need
+        # to consider the half step into the block
         pres[:, *sl_next] = pres[:, *sl_prev].copy()
-        # Add half step of previous cell
-        pres[:, *sl_next] += pgrad[axis][:, *sl_prev]
+        # Only add half step of previous cells if we are in the block.
+        if gc_halfstep or sl_prev[2-axis].start != 0:
+            # Add half step of previous cell
+            pres[:, *sl_next] += pgrad[axis][:, *sl_prev]
         # Add half step of current cell
         pres[:, *sl_next] += pgrad[axis][:, *sl_next]
         
@@ -240,6 +334,8 @@ def integrate_block(pres, pgrad, axis, sl, direction=1, debug=False):
         # Update next slice
         sl_next[2 - axis] = slice(start + direction, stop + direction, direction)
     
+    # Update GC to contain value at face
+    # pres[:, *sl_next] += pgrad[axis][:, *sl_prev]
     return pres
 
 
@@ -266,10 +362,15 @@ def create_ghostcells(data):
 #           update children with data
 #   if neighbour does not exist and parent exist
 #       parse data to neighbour of parent
-def fill_ghostcells(data_pad, gid, bbox, sel=None, debug=False, parent_norm=4.0):
+def fill_ghostcells(
+    data_pad, gid, bbox,
+    sel=None, debug=False,
+    parent_norm=4.0, parent_data_exist=False,
+    add_halfstep=None
+):
     # Check if sub selection is requested
     if sel is None:
-        sel = range(data_pad.shape[0])
+        sel = list(range(data_pad.shape[0]))
 
     # Make sure the block selection is either list or range
     if type(sel) is not list and type(sel) is not range:
@@ -283,8 +384,26 @@ def fill_ghostcells(data_pad, gid, bbox, sel=None, debug=False, parent_norm=4.0)
         slice(None, None, None)
     ]
     
+    # Always go backwards to first fill higher refined
+    # blocks before their parents
+    sel = sorted(sel)[::-1]
+    
+    # Create copy of all faces
+    # data_face_xm = data_pad[:, 1:9, 1:9, 0].copy()
+    # data_face_xp = data_pad[:, 1:9, 1:9, -1].copy()
+    # data_face_ym = data_pad[:, 1:9, 0, 1:9].copy()
+    # data_face_yp = data_pad[:, 1:9, -1, 1:9].copy()
+    # data_face_zm = data_pad[:, 0, 1:9, 1:9].copy()
+    # data_face_zp = data_pad[:, -1, 1:9, 1:9].copy()
+    
     #data_pad = data_pad.copy()
-    #data_pad[:, 1:9, 1:9, 1:9] = update_all_parent_blocks(data=data_pad[:, 1:9, 1:9, 1:9], gid=gid)
+    #data_pad[:, 1:9, 1:9, 1:9] = update_all_parent_blocks(
+    #    data=data_pad[:, 1:9, 1:9, 1:9],
+    #    gid=gid
+    #)
+    
+    update_children = np.ones_like(sel, dtype=bool).tolist()
+    cnt = 0
     
     # Loop over requested blocks
     for it in sel:
@@ -298,6 +417,7 @@ def fill_ghostcells(data_pad, gid, bbox, sel=None, debug=False, parent_norm=4.0)
 
         # Select list index of neighbours
         neigh_list = blk_info[:6]
+        child_list = blk_info[7:]
         
         # Loop over all neighbours
         # 0   1   2   3   4   5
@@ -315,11 +435,13 @@ def fill_ghostcells(data_pad, gid, bbox, sel=None, debug=False, parent_norm=4.0)
             # Count backwards as data order is z,y,x
             # ni     = [0, 1, 2, 3, 4, 5]
             # xyz_sw = [2, 2, 1, 1, 0, 0]
+            # xyz_sw = [0, 0, 1, 1, 2, 2]
             # 0 - x, 1 - y, 2 - z
             xyz_sw = ni // 2
             
             # Update neighbour slice
             # Remove already determined slice
+            # 2 = x, 1 = y, 0 = z
             sl_ind = [2, 1, 0]
             # ni   = [0, 1, 2, 3, 4, 5]
             # ax_n = [2, 2, 1, 1, 0, 0]
@@ -330,7 +452,8 @@ def fill_ghostcells(data_pad, gid, bbox, sel=None, debug=False, parent_norm=4.0)
             #   slice 1 for negative neighbour
             #   slice 8 for positive neighbour
             # in padded coordinates (+1)
-            pm_sw_curr = ni % 2 * 7 + 1
+            pm_sw_curr = (ni % 2) * 7 + 1
+            #pm_sw_curr = ni % 2 * 9
             
             # Create slicing set for data from current block
             sl_curr = sl.copy()
@@ -344,6 +467,8 @@ def fill_ghostcells(data_pad, gid, bbox, sel=None, debug=False, parent_norm=4.0)
             
             # Determine slice of neighbour
             # where data is supposed to be put
+            # ni          = 0, 1, 2, 3, 4, 5
+            # pm_sw_neigh = 9, 0, 9, 0, 9, 0
             pm_sw_neigh = (ni-1) % 2 * 9
             
             sl_neigh = sl.copy()
@@ -353,8 +478,12 @@ def fill_ghostcells(data_pad, gid, bbox, sel=None, debug=False, parent_norm=4.0)
             
             # Select data to parse to neighbour
             # Sub selected without ghost cells
-            face_data = data_pad[it, *sl_curr]
-            
+            face_data = data_pad[it, *sl_curr].copy()
+
+            # Add half step of integral
+            if add_halfstep is not None:
+                face_data += add_halfstep[xyz_sw][it, *sl_curr] * (-1)**(1 + ni%2)
+                
             # If neighbour exist pass data to neighbour
             if tmp_neigh != -1 - 1:
                 if debug:
@@ -362,21 +491,25 @@ def fill_ghostcells(data_pad, gid, bbox, sel=None, debug=False, parent_norm=4.0)
                     print('\torig:', sl_curr)
                     print('\tdest:', sl_neigh)
                     # print(face_data)
+                    
                 # Store data in ghost cells of neighbour block
                 data_pad[tmp_neigh, *sl_neigh] = face_data
-            
+       
                 # Get children ids
                 blk_info_neigh = gid[tmp_neigh] - 1
                 children_neigh = blk_info_neigh[7:]
                 neigh_has_child = children_neigh[0] != -1 - 1
+                # Only update neighbour children if current node
+                # does not have children
+                neigh_has_child *= child_list[0] == -1 - 1
                 
                 # If neighbour has children
                 # Pass data to children of neighbour
-                if neigh_has_child:
-                    # Make a copy of the data that needs to be pushed
+                if neigh_has_child and update_children[cnt]:
                     tmp_data = face_data.copy()
                     
-                    # Expand array by factor 2 for easier slicing onto the children
+                    # Expand array by factor 2 for easier slicing onto
+                    # the children
                     tmp_data = np.repeat(tmp_data, 2, axis=sl_ind[0])
                     tmp_data = np.repeat(tmp_data, 2, axis=sl_ind[1])
                     
@@ -394,7 +527,8 @@ def fill_ghostcells(data_pad, gid, bbox, sel=None, debug=False, parent_norm=4.0)
                         # Children are in z-order (xyz):
                         #   (0 0 0), (1 0 0), (0 1 0), (1 1 0)
                         #   (0 0 1), (1 0 1), (0 1 1), (1 1 1)
-                        # Selection depends on axis along we check for a neighbour:
+                        # Selection depends on axis along
+                        # we check for a neighbour:
                         #   ax_n: 2 = x, 1 = y, 0 = z
                         #   cid     :  0  1  2  3  4  5  6  7
                         #   ax_n = 0: [0, 0, 0, 0, 1, 1, 1, 1]
@@ -406,7 +540,22 @@ def fill_ghostcells(data_pad, gid, bbox, sel=None, debug=False, parent_norm=4.0)
                             # Get list index of child which lies
                             # at the correct side along the required axis
                             tmp_cid = children_neigh[cid]
-                            # Determine shift (which of the 4 panels we get from the child)
+
+                            # Attempt to interpolate GCs
+                            # Does not work well
+                            # Get coordinates of the GC needed for the
+                            # neighbour block
+                            # ccoord_neigh = get_gc_pos(bbox=bbox[[tmp_cid]].copy())[0]
+                            # pts = ccoord_neigh[*sl_neigh, :]
+                            
+                            # tmp_data2 = interp_data(
+                            #     data_pad=data_pad[it].copy(),
+                            #     bbox=bbox[it].copy(),
+                            #     pos_out=pts
+                            # )
+                            
+                            # Determine shift
+                            # (which of the 4 panels we get from the child)
                             shift_xyz = [
                                 (cid // 4) % 2,
                                 (cid // 2) % 2,
@@ -424,6 +573,7 @@ def fill_ghostcells(data_pad, gid, bbox, sel=None, debug=False, parent_norm=4.0)
                             
                             # Store data in child of neighbour block
                             data_pad[tmp_cid, *sl_neigh] = tmp_data[*sl_curr_cid]
+                            # data_pad[tmp_cid, *sl_neigh] = tmp_data2
                             if debug:
                                 print('\tNeighbour', tmp_neigh, 'has child:', tmp_cid)
                                 print('\t', tmp_cid, 'is child nr', cid, 'of', tmp_neigh)
@@ -443,6 +593,17 @@ def fill_ghostcells(data_pad, gid, bbox, sel=None, debug=False, parent_norm=4.0)
                 # Get neighbour block of parent (same direction as before)
                 tmp_neigh_par = blk_info_par[:6][ni]
                 
+                if tmp_neigh_par != -39 - 1 and False:
+                    if not parent_data_exist:
+                        data_pad[:, 1:9, 1:9, 1:9] = update_all_parent_blocks(
+                            data=data_pad[:, 1:9, 1:9, 1:9],
+                            gid=gid,
+                            sel=it
+                        )
+                    
+                    sel.append(int(blk_info[6]))
+                    update_children.append(False)
+                
                 # Check if neighbour is out of domain
                 if tmp_neigh_par != -39 - 1:
                     if debug:
@@ -452,27 +613,6 @@ def fill_ghostcells(data_pad, gid, bbox, sel=None, debug=False, parent_norm=4.0)
                     cid = np.arange(8)[blk_info_par[7:] == it][0]
                     
                     # Determine the quadrant in which we parse the data
-                    #sl_ind_cid = [2, 1, 0]
-                    #sl_ind_cid.pop(xyz_sw)
-                    
-                    #shift_all = (bbox[tmp_neigh_par, :, 0] - bbox[it, :, 0])
-                    #shift_all /= (bbox[it, :, 1] - bbox[it, :, 0])
-                    #shift_all = np.abs(shift_all).astype(int) * 4
-                    
-                    # Determine shift (which of the 4 panels we get from the child)
-                    #shift0 = (bbox[tmp_neigh_par, sl_ind[0], 0] - bbox[it, sl_ind[0], 0])
-                    #shift0 /= (bbox[it, sl_ind[0], 1] - bbox[it, sl_ind[0], 0])
-                    #shift0 = abs(int(np.round(shift0))) // 2 * 4
-                    
-                    #shift1 = (bbox[tmp_neigh_par, sl_ind[1], 0] - bbox[it, sl_ind[1], 0])
-                    #shift1 /= (bbox[it, sl_ind[1], 1] - bbox[it, sl_ind[1], 0])
-                    #shift1 = abs(int(np.round(shift1))) // 2 * 4
-                    
-                    #shift_sc = [1, 2]
-                    
-                    #shift0 = cid // (2 ** shift_sc[0]) % 2 * 4
-                    #shift1 = cid // (2 ** shift_sc[1]) % 2 * 4
-                    
                     shift_xyz = [
                         (cid // 4) % 2,
                         (cid // 2) % 2,
@@ -507,18 +647,24 @@ def fill_ghostcells(data_pad, gid, bbox, sel=None, debug=False, parent_norm=4.0)
                     tmp_sh[sl_ind[1]] //= 2
                     
                     # Downsample data
-                    # Currently wrong, only considers 4 instead of 8 cells to fill parent
-                    #sl_curr2 = sl.copy()
-                    #if pm_sw_curr == 1:
-                    #    sl_curr2[ax_n] = slice(pm_sw_curr, pm_sw_curr + 2, None)
-                    #else:
-                    #    sl_curr2[ax_n] = slice(pm_sw_curr - 1, pm_sw_curr + 1, None)
+                    # Parent cell covers 2x2x2 in children thus
+                    # need to include previous layer as well for
+                    # the average
+                    sl_curr2 = sl.copy()
+                    if pm_sw_curr == 1:
+                        sl_curr2[ax_n] = slice(
+                            pm_sw_curr, pm_sw_curr + 2, None
+                        )
+                    else:
+                        sl_curr2[ax_n] = slice(
+                            pm_sw_curr - 1, pm_sw_curr + 1, None
+                        )
                         
-                    #sl_curr2[sl_ind[0]] = slice(1, 9, None)
-                    #sl_curr2[sl_ind[1]] = slice(1, 9, None)
-                    #face_data = data_pad[it, *sl_curr2].mean(axis=ax_n, keepdims=True)
-
-                    #print(sl_neigh, sl_curr2)
+                    sl_curr2[sl_ind[0]] = slice(1, 9, None)
+                    sl_curr2[sl_ind[1]] = slice(1, 9, None)
+                    # face_data = data_pad[it, *sl_curr2].mean(
+                    #     axis=ax_n, keepdims=True
+                    # )
 
                     tmp_data = np.zeros(tmp_sh)
                     sl_ds = sl.copy()
@@ -550,6 +696,26 @@ def fill_ghostcells(data_pad, gid, bbox, sel=None, debug=False, parent_norm=4.0)
                     
                     # Store data in ghost cells of neighbour block
                     data_pad[tmp_neigh_par, *sl_neigh] = tmp_data
+        cnt += 1
+        
+    # data_pad[:, 1:9, 1:9, 0] = np.maximum(
+    #     data_face_xm, data_pad[:, 1:9, 1:9, 0]
+    # )
+    # data_pad[:, 1:9, 1:9, -1] = np.maximum(
+    #     data_face_xp, data_pad[:, 1:9, 1:9, -1]
+    # )
+    # data_pad[:, 1:9, 0, 1:9] = np.maximum(
+    #     data_face_ym, data_pad[:, 1:9, 0, 1:9]
+    # )
+    # data_pad[:, 1:9, -1, 1:9] = np.maximum(
+    #     data_face_yp, data_pad[:, 1:9, -1, 1:9]
+    # )
+    # data_pad[:, 1:9, 0, 1:9] = np.maximum(
+    #     data_face_zm, data_pad[:, 1:9, 0, 1:9]
+    # )
+    # data_pad[:, 1:9, -1, 1:9] = np.maximum(
+    #     data_face_zp, data_pad[:, 1:9, -1, 1:9]
+    # )
 
     return data_pad
     
@@ -560,7 +726,10 @@ def fill_ghostcells(data_pad, gid, bbox, sel=None, debug=False, parent_norm=4.0)
 # cids (dir=-1) (0, 2, 4, 6)    (0, 1, 4, 5)    (0, 1, 2, 3)
 # cids (dir=+1) (1, 3, 5, 7)    (2, 3, 6, 7)    (4, 5, 6, 7)
 # corner
-def get_neighbour_bid(bid, gid, axis, direction, sl=None, debug=False):
+def get_neighbour_bid(
+    bid, gid, axis, direction,
+    sl=None, debug=False
+):
     # Input is three slices
     # Select the correct children which could be hit
     child_sub_sel = [0, 1, 2, 3]
@@ -582,8 +751,11 @@ def get_neighbour_bid(bid, gid, axis, direction, sl=None, debug=False):
                 if tmp_sl[0].stop > 4:
                     child_sub_sel += [3]
     
-    if debug:
-        print('\tWhich children in sub selection will be returned:', child_sub_sel)
+        if debug:
+            print(
+                '\tWhich children in sub selection will be returned:',
+                child_sub_sel
+            )
     
     # Get correct entry in list
     neigh_ind = 2 * axis
@@ -598,10 +770,10 @@ def get_neighbour_bid(bid, gid, axis, direction, sl=None, debug=False):
     
     
     # Get block info
+    # Remove 1 as Fortran starts index at 1
     blk_info = gid[bid] - 1
     
     # Get list of neighbours
-    # Remove 1 as Fortran starts index at 1
     bid_neigh = blk_info[:, neigh_ind]
     
     # If no neighbour exist at this level
@@ -637,7 +809,8 @@ def get_neighbour_bid(bid, gid, axis, direction, sl=None, debug=False):
     if debug:
         print('Has children:', sel_has_child.sum())
     if sel_has_child.sum():
-        # Select the children indices which are at the interface with the input block
+        # Select the children indices which are at
+        # the interface with the input block
         sel_correct_child = np.arange(8) // 2**axis % 2 == (-direction + 1) // 2
         if debug:
             print('Select', sel_correct_child.sum(), 'new children')
@@ -656,3 +829,86 @@ def get_neighbour_bid(bid, gid, axis, direction, sl=None, debug=False):
         print('\tTotal blocks found:', len(bid_neigh))
     return np.unique(bid_neigh).tolist()
 
+
+def interp_data(data_pad, bbox, pos_out):
+    dx = (bbox[:, 1] - bbox[:, 0]) / (8, 8, 8)
+    
+    x = np.linspace(bbox[0, 0] - dx[0], bbox[0, 1] + dx[0], 10, endpoint=False) + dx[0] / 2.
+    y = np.linspace(bbox[1, 0] - dx[1], bbox[1, 1] + dx[1], 10, endpoint=False) + dx[1] / 2.
+    z = np.linspace(bbox[2, 0] - dx[2], bbox[2, 1] + dx[2], 10, endpoint=False) + dx[2] / 2.
+    
+    # Create interpolate for current neighbour block
+    interp = RegularGridInterpolator(
+        (z, y, x),
+        data_pad,
+        fill_value=None,
+        bounds_error=False,
+        method='linear'
+    )
+    
+    pts = np.asarray(
+        [
+            pos_out[..., 2].flatten(), # z
+            pos_out[..., 1].flatten(), # y
+            pos_out[..., 0].flatten()  # x
+        ]
+    ).T
+    tmp_data = interp(pts).reshape(pos_out[..., 0].shape)
+    return tmp_data
+
+# Determine position of cell's including GC
+def get_gc_pos(bbox, nr_gc=1):
+    # Get cell spacing
+    dx = (bbox[..., 1] - bbox[..., 0]) / (8, 8, 8)
+    # Create copy of bounding box
+    bbox_gc = bbox.copy()
+    # Increase bouncing box to include gc
+    bbox_gc[..., 0] -= dx * nr_gc
+    bbox_gc[..., 1] += dx * nr_gc
+    
+    ccoord_gc = get_cell_centers(
+        bbox=bbox_gc,
+        bshape=(8+2*nr_gc, 8+2*nr_gc, 8+2*nr_gc)
+    )
+    
+    return ccoord_gc
+
+# Interpolate to GC position of neighbour
+# if block is at lower/coarser refinement
+# Linear interpolation
+def lin_intp(data, axis, forw, gc=False):
+    sl = [
+        slice(None),
+        slice(None),
+        slice(None)
+    ]
+    
+    if forw:
+        i0 = 6
+    else:
+        i0 = 0
+    
+    if gc:
+        i0 += 1
+    
+    # Slice of forward cell
+    sl_fw = slice(i0 + 1, i0 + 2)
+    # Slice of backward cell
+    sl_bw = slice(i0, i0 + 1)
+    
+    sl[2 - axis] = sl_fw
+    # Data in forward cell (i+1)
+    f_p = data[*sl]
+    
+    sl[2 - axis] = sl_bw
+    # Data in backward cell (i)
+    f_m = data[*sl]
+    
+    if forw:
+        # If we want to calculate (i+2)
+        f_int = (f_p - f_m) / 4. + f_p
+    else:
+        # If we want to calculate (i-1)
+        f_int = -(f_p - f_m) / 4. + f_m
+
+    return f_int
